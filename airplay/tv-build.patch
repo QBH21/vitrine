@@ -1,0 +1,304 @@
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 2f56e62..f82da7a 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,11 +11,11 @@ val localProps = Properties().apply {
+     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use(::load)
+ }
+ 
+-val allAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
++val allAbis = listOf("armeabi-v7a")
+ 
+ android {
+     namespace = "io.github.jqssun.airplay"
+-    compileSdk = 37
++    compileSdk = 36
+     ndkVersion = "27.0.12077973"
+ 
+     if (localProps.containsKey("storeFile")) {
+@@ -32,7 +32,7 @@ android {
+     defaultConfig {
+         applicationId = "io.github.jqssun.airplay"
+         minSdk = 23
+-        targetSdk = 37
++        targetSdk = 36
+         versionCode = 36
+         versionName = "0.0.36"
+ 
+@@ -57,7 +57,7 @@ android {
+         release {
+             isMinifyEnabled = true
+             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+-            signingConfigs.findByName("release")?.let { signingConfig = it }
++            signingConfig = signingConfigs.getByName("debug")   // sideloaded onto one TV
+             ndk { abiFilters += allAbis }
+         }
+         // debuggable build with HWASan (arm64) + UBSan in native code
+@@ -88,6 +88,8 @@ android {
+         compose = true
+         prefab = true
+     }
++    // Sideloaded onto one TV, never published: don't fail release builds on Play-store lint rules.
++    lint { checkReleaseBuilds = false }
+ }
+ 
+ tasks.register("applyUxplayPatches") {
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index bfe06e7..c3df339 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -39,11 +39,6 @@
+             android:supportsPictureInPicture="true"
+             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+             android:launchMode="singleTop">
+-            <intent-filter>
+-                <action android:name="android.intent.action.MAIN" />
+-                <category android:name="android.intent.category.LAUNCHER" />
+-                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+-            </intent-filter>
+         </activity>
+ 
+         <service
+diff --git a/app/src/main/kotlin/io/github/jqssun/airplay/MainActivity.kt b/app/src/main/kotlin/io/github/jqssun/airplay/MainActivity.kt
+index 44288e9..15f11a6 100644
+--- a/app/src/main/kotlin/io/github/jqssun/airplay/MainActivity.kt
++++ b/app/src/main/kotlin/io/github/jqssun/airplay/MainActivity.kt
+@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.lifecycleScope
+ import androidx.lifecycle.repeatOnLifecycle
++import kotlinx.coroutines.flow.collectLatest
+ import io.github.jqssun.airplay.service.AirPlayService
+ import io.github.jqssun.airplay.ui.MainScreen
+ import io.github.jqssun.airplay.ui.theme.AirPlayTheme
+@@ -69,7 +70,7 @@ class MainActivity : ComponentActivity() {
+             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !_granted(Manifest.permission.POST_NOTIFICATIONS)) {
+                 add(Manifest.permission.POST_NOTIFICATIONS)
+             }
+-            if (!hasLocalNetwork()) add(Manifest.permission.ACCESS_LOCAL_NETWORK)
++            if (!hasLocalNetwork()) add("android.permission.ACCESS_LOCAL_NETWORK")
+         }
+         if (missing.isNotEmpty()) permissions.launch(missing.toTypedArray())
+ 
+@@ -95,6 +96,24 @@ class MainActivity : ComponentActivity() {
+             }
+         }
+ 
++        // Headless use on the TV: the service opens this screen when a device connects, so close it again
++        // once the last device disconnects, and the TV goes back to the home screen by itself.
++        lifecycleScope.launch {
++            repeatOnLifecycle(Lifecycle.State.STARTED) {
++                var sawSession = false
++                combine(viewModel.connectionCount, viewModel.mirroringActive, viewModel.videoPlaybackActive) { c, m, v -> Triple(c, m, v) }
++                    .collectLatest { (conns, mirror, video) ->
++                        if (conns > 0) sawSession = true
++                        when {
++                            conns == 0 && sawSession -> { sawSession = false; goHome() }
++                            // Connected but nothing to show (audio-only, or mirroring just ended): back to the
++                            // home screen; music keeps playing from the service. Cancelled if video starts.
++                            conns > 0 && !mirror && !video -> { delay(6_000); goHome() }
++                        }
++                    }
++            }
++        }
++
+         // auto-enter pre-declared in pip params
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+             lifecycleScope.launch {
+@@ -108,20 +127,22 @@ class MainActivity : ComponentActivity() {
+             }
+         }
+ 
++        // TV build: only the video surface, never the receiver's own interface (see TvScreen).
+         setContent {
+-            AirPlayTheme {
+-                MainScreen(
+-                    viewModel = viewModel,
+-                    isInPip = isInPip.value,
+-                    onSurfaceAvailable = { viewModel.onSurfaceAvailable(it) },
+-                    onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
+-                    onPip = { enterPip() },
+-                    onLocalNetwork = ::_requestLocalNetwork
+-                )
+-            }
++            io.github.jqssun.airplay.ui.TvScreen(
++                viewModel = viewModel,
++                onSurfaceAvailable = { viewModel.onSurfaceAvailable(it) },
++                onSurfaceDestroyed = { viewModel.onSurfaceDestroyed(it) },
++            )
+         }
+     }
+ 
++    /** Back to the TV's home screen (not just closing, which could land on whatever app was behind). */
++    private fun goHome() {
++        startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
++        finish()
++    }
++
+     private fun _granted(permission: String) =
+         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+ 
+@@ -139,8 +160,8 @@ class MainActivity : ComponentActivity() {
+     }
+ 
+     private fun _syncLocalNetwork(requested: Boolean = false) {
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN) return
+-        val p = Manifest.permission.ACCESS_LOCAL_NETWORK
++        if (Build.VERSION.SDK_INT < 37) return
++        val p = "android.permission.ACCESS_LOCAL_NETWORK"
+         val prev = viewModel.localNetwork.value
+         val now = when {
+             hasLocalNetwork() -> LocalNetworkAccess.GRANTED
+@@ -153,11 +174,11 @@ class MainActivity : ComponentActivity() {
+     }
+ 
+     private fun _requestLocalNetwork() {
+-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN) return
++        if (Build.VERSION.SDK_INT < 37) return
+         if (viewModel.localNetwork.value == LocalNetworkAccess.SETTINGS) {
+             startActivity(appSettingsIntent())
+         } else {
+-            permissions.launch(arrayOf(Manifest.permission.ACCESS_LOCAL_NETWORK))
++            permissions.launch(arrayOf("android.permission.ACCESS_LOCAL_NETWORK"))
+         }
+     }
+ 
+diff --git a/app/src/main/kotlin/io/github/jqssun/airplay/Permissions.kt b/app/src/main/kotlin/io/github/jqssun/airplay/Permissions.kt
+index ee8d901..a87ad87 100644
+--- a/app/src/main/kotlin/io/github/jqssun/airplay/Permissions.kt
++++ b/app/src/main/kotlin/io/github/jqssun/airplay/Permissions.kt
+@@ -9,8 +9,8 @@ import android.os.Build
+ import android.provider.Settings
+ import androidx.core.content.ContextCompat
+ 
+-fun Context.hasLocalNetwork() = Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN ||
+-    ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
++fun Context.hasLocalNetwork() = Build.VERSION.SDK_INT < 37 ||
++    ContextCompat.checkSelfPermission(this, "android.permission.ACCESS_LOCAL_NETWORK") == PackageManager.PERMISSION_GRANTED
+ 
+ fun Context.appSettingsIntent() =
+     Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))
+diff --git a/app/src/main/kotlin/io/github/jqssun/airplay/Prefs.kt b/app/src/main/kotlin/io/github/jqssun/airplay/Prefs.kt
+index dfa7492..699e159 100644
+--- a/app/src/main/kotlin/io/github/jqssun/airplay/Prefs.kt
++++ b/app/src/main/kotlin/io/github/jqssun/airplay/Prefs.kt
+@@ -72,7 +72,7 @@ object Prefs {
+ 
+     fun forced(v: String) = when (v) { ON -> true; OFF -> false; else -> null }
+ 
+-    val SERVER_NAME = str("server_name", "Android AirPlay", restart = true)
++    val SERVER_NAME = str("server_name", "Android TV", restart = true)
+     val SERVER_PORT = int("server_port", 7000, 1..65535, restart = true)
+     val AUTO_START = bool("auto_start", true)
+     val BOOT_AUTO_START = bool("boot_auto_start", true)
+diff --git a/app/src/main/kotlin/io/github/jqssun/airplay/service/AirPlayService.kt b/app/src/main/kotlin/io/github/jqssun/airplay/service/AirPlayService.kt
+index 974c5c2..28af08c 100644
+--- a/app/src/main/kotlin/io/github/jqssun/airplay/service/AirPlayService.kt
++++ b/app/src/main/kotlin/io/github/jqssun/airplay/service/AirPlayService.kt
+@@ -652,6 +652,7 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
+     }
+ 
+     override fun onVideoPlay(location: String, startPositionSeconds: Float) {
++        if (shouldLaunchOnConnect()) launchMainActivity()   // TV build: see onMirrorRunning
+         _videoLocation.value = location
+         _videoPlaySeq.value++
+         _videoPollSuppressed = false
+@@ -797,7 +798,8 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
+         val firstConnection = _connectionCount.value == 0
+         _connectionCount.value++
+         log("Sender connected (${_connectionCount.value})")
+-        if (firstConnection && shouldLaunchOnConnect()) launchMainActivity()
++        // TV build: no screen on a bare connection (Apple devices connect for audio or just to look the TV up);
++        // the video screen opens from onMirrorRunning / onVideoPlay once there is something to show.
+     }
+ 
+     override fun onConnectionDestroy() {
+@@ -885,6 +887,9 @@ class AirPlayService : LifecycleService(), RaopCallbackHandler, LogListener {
+     }
+ 
+     override fun onMirrorRunning(running: Boolean) {
++        // TV build: the video screen may already have gone back to Home (audio-only start); bring it up
++        // again when mirroring actually begins. A no-op if it's already in front.
++        if (running && shouldLaunchOnConnect()) launchMainActivity()
+         if (running) videoRenderer.startSession() else {
+             videoRenderer.stopSession()
+             _mirroringActive.value = false
+diff --git a/app/src/main/kotlin/io/github/jqssun/airplay/ui/TvScreen.kt b/app/src/main/kotlin/io/github/jqssun/airplay/ui/TvScreen.kt
+new file mode 100644
+index 0000000..4e73418
+--- /dev/null
++++ b/app/src/main/kotlin/io/github/jqssun/airplay/ui/TvScreen.kt
+@@ -0,0 +1,61 @@
++package io.github.jqssun.airplay.ui
++
++import android.view.Surface
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.text.BasicText
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.text.TextStyle
++import androidx.compose.ui.unit.dp
++import androidx.compose.ui.unit.sp
++import io.github.jqssun.airplay.viewmodel.MainViewModel
++
++/**
++ * The only screen used on the TV: black, with just the video surface. There's no status, settings or
++ * controls here - the receiver runs invisibly in the background, and this screen exists solely to show
++ * a mirrored or played video while a device is connected (the activity goes back to the home screen as
++ * soon as the session ends).
++ */
++@Composable
++fun TvScreen(
++    viewModel: MainViewModel,
++    onSurfaceAvailable: (Surface) -> Unit,
++    onSurfaceDestroyed: (Surface) -> Unit,
++) {
++    val videoPlayback by viewModel.videoPlaybackActive.collectAsState()
++    val mirrorAspect by viewModel.videoAspect.collectAsState()
++    val playbackAspect by viewModel.videoPlaybackAspect.collectAsState()
++    val pin by viewModel.pinCode.collectAsState()
++
++    Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
++        if (videoPlayback) {
++            // AirPlay video (a URL the sender hands over, e.g. from a video app)
++            VideoSurfaceView(
++                onSurfaceAvailable = { viewModel.onVideoPlaybackSurfaceAvailable(it) },
++                onSurfaceDestroyed = { viewModel.onVideoPlaybackSurfaceDestroyed(it) },
++                aspectRatio = playbackAspect,
++            )
++        } else {
++            // Screen mirroring; the surface is always present so the first frame has somewhere to go
++            VideoSurfaceView(
++                onSurfaceAvailable = onSurfaceAvailable,
++                onSurfaceDestroyed = onSurfaceDestroyed,
++                aspectRatio = mirrorAspect,
++            )
++        }
++        pin?.let {
++            BasicText(
++                "AirPlay code: $it",
++                Modifier.align(Alignment.TopCenter).padding(top = 48.dp),
++                style = TextStyle(color = Color.White, fontSize = 40.sp),
++            )
++        }
++    }
++}
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+index 8d28437..0a9e754 100644
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -1,6 +1,6 @@
+ <?xml version="1.0" encoding="utf-8"?>
+ <resources>
+-    <string name="app_name">AirPlay Server</string>
++    <string name="app_name">AirPlay receiver</string>
+ 
+     <!-- Notification -->
+     <string name="notification_channel">AirPlay Service</string>

@@ -1,0 +1,17 @@
+# Build output
+build/
+.gradle/
+.kotlin/
+.cxx/
+*.apk
+*.aab
+
+# Local machine
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# TV logs written by tools/
+tools/tv-logs/
+tv-logs/

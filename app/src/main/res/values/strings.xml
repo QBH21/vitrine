@@ -1,0 +1,3 @@
+<resources>
+    <string name="home_redirect_description">Opens Vitrine whenever the TV goes to its home screen. It only sees when the stock launcher opens and can\'t read anything on screen.</string>
+</resources>

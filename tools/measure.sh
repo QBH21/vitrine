@@ -1,0 +1,25 @@
+#!/bin/bash
+# Snapshot of the TV: model, Android version, chip, RAM, storage, packages, processes. Read-only.
+# Usage: TV=192.168.1.50 ./measure.sh baseline     (then ./measure.sh after, and compare the two summary.txt)
+set -u; . "$(dirname "$0")/common.sh"
+OUT="$LOG_DIR/${1:?label, e.g. baseline}"; mkdir -p "$OUT"
+tv pm list packages -s | sort > "$OUT/packages-system.txt"
+tv pm list packages -d | sort > "$OUT/packages-disabled.txt"
+tv pm list packages -3 | sort > "$OUT/packages-third-party.txt"
+tv pm list packages    | sort > "$OUT/packages-all.txt"
+tv dumpsys meminfo     > "$OUT/meminfo.txt"
+{
+  echo "date:              $(date '+%Y-%m-%d %H:%M')"
+  echo "model:             $(tv getprop ro.product.manufacturer) $(tv getprop ro.product.model) ($(tv getprop ro.product.device))"
+  echo "android:           $(tv getprop ro.build.version.release) (SDK $(tv getprop ro.build.version.sdk)), build $(tv getprop ro.build.display.id)"
+  echo "chip / ABI:        $(tv getprop ro.board.platform) / $(tv getprop ro.product.cpu.abilist)"
+  echo "screen:            $(tv wm size | awk -F': ' '{print $2}' | paste -sd' ' -), $(tv wm density | awk -F': ' '{print $2}' | paste -sd' ' -) dpi"
+  echo "RAM total/avail:   $(tv cat /proc/meminfo | awk '/MemTotal/{t=$2} /MemAvailable/{v=$2} END{printf "%d MB / %d MB", t/1024, v/1024}')"
+  echo "storage /data:     $(tv df -h /data | awk 'NR==2{print $3 " used of " $2 " (" $4 " free)"}')"
+  echo "animation scales:  $(tv settings get global window_animation_scale) / $(tv settings get global transition_animation_scale) / $(tv settings get global animator_duration_scale)"
+  echo "home app:          $(tv cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN | tail -1)"
+  echo "video decoders:    $(tv cat /vendor/etc/media_codecs.xml | grep -A2 -E 'name="[^"]*(AVC|HEVC)[^"]*Decoder"' | grep -oE 'concurrent-instances" max="[0-9]+' | grep -oE '[0-9]+$' | paste -sd/ -) concurrent instances (AVC/HEVC...)"
+  echo "packages:          $(wc -l < "$OUT/packages-all.txt" | tr -d ' ') total, $(wc -l < "$OUT/packages-third-party.txt" | tr -d ' ') user-installed, $(wc -l < "$OUT/packages-disabled.txt" | tr -d ' ') disabled"
+  echo "running processes: $(tv ps -A | wc -l | tr -d ' ')"
+  echo "top memory users:  $(tv dumpsys meminfo | sed -n '/Total PSS by process/,/Total PSS by OOM/p' | grep -E 'K: ' | head -6 | sed -E 's/^ +//; s/ \(pid.*//' | paste -sd';' -)"
+} | tee "$OUT/summary.txt"
